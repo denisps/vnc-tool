@@ -1,0 +1,12 @@
+{
+  "name": "vnc-tool",
+  "version": "0.1.0",
+  "description": "VNC CLI tool for AI agents and workstation auditing",
+  "bin": { "vnc": "./bin/vnc" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:verbose": "node --test --reporter=spec test/*.test.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "MIT"
+}

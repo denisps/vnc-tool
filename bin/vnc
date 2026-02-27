@@ -1,0 +1,248 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+
+const { parseArgs } = require('../lib/args');
+const { VNCClient } = require('../lib/client');
+const {
+  startSession, stopSession, sendCommand,
+  listSessions, sessionExists,
+} = require('../lib/session');
+
+const VERSION = '0.1.0';
+
+// ── Help text ─────────────────────────────────────────────────────────────────
+
+const HELP = `
+vnc-tool ${VERSION} — VNC CLI for AI agents and workstation control
+
+Usage:
+  vnc [options] <command> [args...]
+
+Options:
+  -H, --host HOST       VNC server hostname (default: localhost)
+  -p, --port PORT       VNC server port (default: 5900)
+  -P, --password PASS   VNC password
+  -s, --session ID      Use persistent session with given ID
+      --timeout MS      Connection/operation timeout ms (default: 10000)
+      --json            Output JSON (for AI agent use)
+  -h, --help            Show this help
+  -v, --version         Show version
+
+Commands:
+  screenshot [file]           Capture screen; write to file or stdout
+  click <x> <y> [button]      Mouse click (button: left|right|middle)
+  move <x> <y>                Move mouse
+  mousedown <x> <y> [button]  Mouse button press
+  mouseup <x> <y> [button]    Mouse button release
+  scroll <x> <y> [amount]     Scroll (positive=down, negative=up, default 3)
+  type <text>                 Type text string
+  key <combo>                 Press key combo (e.g. ctrl+c, alt+F4)
+  keydown <key>               Hold key down
+  keyup <key>                 Release key
+  delay <ms>                  Wait N milliseconds
+  run <json|->                Run batch JSON commands (or '-' to read stdin)
+  start                       Start persistent session (requires --session --host)
+  stop                        Stop persistent session (requires --session)
+  list                        List active sessions
+
+Examples:
+  vnc -H 192.168.1.10 screenshot screen.png
+  vnc -H 192.168.1.10 -P secret click 100 200
+  vnc -H 192.168.1.10 type "hello world"
+  vnc -H 192.168.1.10 -s mybox screenshot
+  vnc -H 192.168.1.10 --json screenshot
+`.trim();
+
+// ── Output helpers ────────────────────────────────────────────────────────────
+
+function output(data, isJson) {
+  if (isJson) {
+    process.stdout.write(JSON.stringify({ ok: true, ...data }) + '\n');
+  } else {
+    if (data.message) console.log(data.message);
+    else if (data.result !== undefined) console.log(data.result);
+  }
+}
+
+function die(msg, isJson) {
+  if (isJson) {
+    process.stdout.write(JSON.stringify({ ok: false, error: String(msg) }) + '\n');
+  } else {
+    process.stderr.write(`Error: ${msg}\n`);
+  }
+  process.exit(1);
+}
+
+// ── One-shot execution ────────────────────────────────────────────────────────
+
+async function runOneShot(command, commandArgs, options) {
+  const client = new VNCClient(options);
+  await client.connect();
+  try {
+    return await dispatch(command, commandArgs, options, client);
+  } finally {
+    await client.disconnect();
+  }
+}
+
+// ── Session-based execution ───────────────────────────────────────────────────
+
+async function runViaSession(command, commandArgs, options) {
+  const id = options.session;
+
+  if (command === 'stop') {
+    await stopSession(id);
+    return { message: `Session "${id}" stopped.` };
+  }
+
+  if (command === 'start') {
+    if (!options.host || options.host === 'localhost') {
+      throw new Error('--host is required when starting a session');
+    }
+    await startSession(id, options);
+    return { message: `Session "${id}" started.` };
+  }
+
+  // Auto-start if not running
+  if (!(await sessionExists(id))) {
+    if (!options.host || options.host === 'localhost') {
+      throw new Error(`Session "${id}" not running. Provide --host to auto-start.`);
+    }
+    await startSession(id, options);
+  }
+
+  // Map command + args into a daemon command object
+  const cmd = buildDaemonCmd(command, commandArgs);
+  const result = await sendCommand(id, cmd);
+  return { result };
+}
+
+function buildDaemonCmd(command, args) {
+  switch (command) {
+    case 'screenshot': return { cmd: 'screenshot', file: args[0] || null };
+    case 'click':      return { cmd: 'click', x: +args[0], y: +args[1], button: args[2] || 'left' };
+    case 'move':       return { cmd: 'move', x: +args[0], y: +args[1] };
+    case 'mousedown':  return { cmd: 'mousedown', x: +args[0], y: +args[1], button: args[2] || 'left' };
+    case 'mouseup':    return { cmd: 'mouseup', x: +args[0], y: +args[1], button: args[2] || 'left' };
+    case 'scroll':     return { cmd: 'scroll', x: +args[0], y: +args[1], amount: args[2] !== undefined ? +args[2] : 3 };
+    case 'type':       return { cmd: 'type', text: args[0] || '' };
+    case 'key':        return { cmd: 'key', combo: args[0] };
+    case 'keydown':    return { cmd: 'keydown', key: args[0] };
+    case 'keyup':      return { cmd: 'keyup', key: args[0] };
+    case 'delay':      return { cmd: 'delay', ms: +args[0] };
+    case 'run': {
+      const json = args[0] === '-'
+        ? fs.readFileSync('/dev/stdin', 'utf8')
+        : args[0] || '[]';
+      return { cmd: 'run', commands: JSON.parse(json) };
+    }
+    default: throw new Error(`Unknown command for session: ${command}`);
+  }
+}
+
+// ── Direct client dispatch ────────────────────────────────────────────────────
+
+async function dispatch(command, args, options, client) {
+  switch (command) {
+    case 'screenshot': {
+      const file = args[0] || null;
+      const png  = await client.screenshot(file);
+      if (!file) {
+        process.stdout.write(png);
+        return { message: 'Screenshot written to stdout' };
+      }
+      return { message: `Screenshot saved to ${file}`, size: png.length };
+    }
+    case 'click':
+      await client.mouseClick(+args[0], +args[1], args[2] || 'left');
+      return { message: `Clicked (${args[0]}, ${args[1]}) with ${args[2] || 'left'}` };
+    case 'move':
+      await client.mouseMove(+args[0], +args[1]);
+      return { message: `Mouse moved to (${args[0]}, ${args[1]})` };
+    case 'mousedown':
+      await client.mouseDown(+args[0], +args[1], args[2] || 'left');
+      return { message: `Mouse down at (${args[0]}, ${args[1]})` };
+    case 'mouseup':
+      await client.mouseUp(+args[0], +args[1], args[2] || 'left');
+      return { message: `Mouse up at (${args[0]}, ${args[1]})` };
+    case 'scroll':
+      await client.mouseScroll(+args[0], +args[1], args[2] !== undefined ? +args[2] : 3);
+      return { message: `Scrolled at (${args[0]}, ${args[1]})` };
+    case 'type':
+      await client.type(args[0] || '');
+      return { message: `Typed: ${args[0]}` };
+    case 'key':
+      await client.keyPress(args[0]);
+      return { message: `Key pressed: ${args[0]}` };
+    case 'keydown':
+      await client.keyDown(args[0]);
+      return { message: `Key down: ${args[0]}` };
+    case 'keyup':
+      await client.keyUp(args[0]);
+      return { message: `Key up: ${args[0]}` };
+    case 'delay':
+      await client.delay(+args[0]);
+      return { message: `Waited ${args[0]}ms` };
+    case 'run': {
+      const raw = args[0] === '-'
+        ? await fs.promises.readFile('/dev/stdin', 'utf8')
+        : args[0] || '[]';
+      const commands = JSON.parse(raw);
+      const results  = await client.run(commands);
+      return { result: results };
+    }
+    default:
+      throw new Error(`Unknown command: ${command}`);
+  }
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+async function main() {
+  const { options, command, commandArgs } = parseArgs(process.argv.slice(2));
+
+  if (options.version) {
+    console.log(`vnc-tool ${VERSION}`);
+    return;
+  }
+
+  if (options.help || !command) {
+    console.log(HELP);
+    return;
+  }
+
+  const isJson = options.json;
+
+  try {
+    // Session-global commands that don't need a VNC connection
+    if (command === 'list') {
+      const sessions = await listSessions();
+      if (isJson) {
+        process.stdout.write(JSON.stringify({ ok: true, sessions }) + '\n');
+      } else {
+        if (sessions.length === 0) {
+          console.log('No active sessions.');
+        } else {
+          sessions.forEach(s => console.log(`  ${s.id}  pid=${s.pid}  ${s.socketPath}`));
+        }
+      }
+      return;
+    }
+
+    let result;
+    if (options.session) {
+      result = await runViaSession(command, commandArgs, options);
+    } else {
+      result = await runOneShot(command, commandArgs, options);
+    }
+
+    output(result, isJson);
+  } catch (err) {
+    die(err.message, isJson);
+  }
+}
+
+main();
