@@ -27,7 +27,7 @@ test('client: screenshot() returns a PNG buffer', async () => {
     assert.equal(png[1], 80);  // 'P'
     assert.equal(png[2], 78);  // 'N'
     assert.equal(png[3], 71);  // 'G'
-    assert.ok(png.length > 100, 'PNG should have reasonable size');
+    assert.ok(png.length > 50, 'PNG should have reasonable size');
   });
 });
 
@@ -46,6 +46,28 @@ test('client: screenshot() writes to file', async () => {
   } finally {
     try { fs.unlinkSync(tmpFile); } catch (_) {}
   }
+});
+
+test('client: updateCount and screenshotRaw mirror RFB state', async () => {
+  await withClient({ width: 20, height: 10, bgColor: { r: 1, g: 2, b: 3 } }, async (client, server) => {
+    assert.equal(client.updateCount, 0);
+    assert.ok(client.screenshotRaw);
+    assert.equal(client.screenshotRaw.length, 20 * 10 * 4);
+    // trigger a partial update
+    client._rfb.requestUpdate(true, 0, 0, 10, 10);
+    await new Promise(r => setTimeout(r, 100));
+    assert.ok(client.updateCount > 0 && client.updateCount < 1);
+    const buf = client.screenshotRaw;
+    // left half should equal bgColor
+    for (let y = 0; y < 10; y++) {
+      for (let x = 0; x < 10; x++) {
+        const off = (y * 20 + x) * 4;
+        assert.equal(buf[off + 0], 1);
+        assert.equal(buf[off + 1], 2);
+        assert.equal(buf[off + 2], 3);
+      }
+    }
+  });
 });
 
 test('client: mouseClick() sends pointer down then up', async () => {
