@@ -81,6 +81,11 @@ test('RFB: captureScreen returns correct dimensions and RGBA data', async () => 
         assert.equal(frame.rgba[off + 2],   0, `pixel ${i} B`);
         assert.equal(frame.rgba[off + 3], 255, `pixel ${i} A`);
       }
+      // screenshotRaw should reflect the same data
+      const raw = client.screenshotRaw;
+      assert.ok(raw);
+      assert.equal(raw.length, frame.rgba.length);
+      assert.deepEqual(Array.from(raw), Array.from(frame.rgba));
     },
   );
 });
@@ -118,6 +123,51 @@ test('RFB: convertRawToRGBA helper produces correct pixels', () => {
     0,   0,   0, 255, // black
   ];
   assert.deepEqual(Array.from(rgba), expected);
+});
+
+test('RFB: updateCount and screenshotRaw behave correctly', async () => {
+  await withServer(
+    { width: 40, height: 20, bgColor: { r: 10, g: 20, b: 30 } },
+    {},
+    async (client) => {
+      await client.connect();
+      assert.equal(client.updateCount, 0);
+      assert.ok(client.screenshotRaw);
+      assert.equal(client.screenshotRaw.length, 40 * 20 * 4);
+
+      // request half-width update
+      client.requestUpdate(true, 0, 0, 20, 20);
+      await new Promise(r => setTimeout(r, 100));
+      assert.ok(Math.abs(client.updateCount - 0.5) < 1e-6);
+
+      const buf = client.screenshotRaw;
+      // left half should be bgColor
+      for (let row = 0; row < 20; row++) {
+        for (let col = 0; col < 20; col++) {
+          const off = (row * 40 + col) * 4;
+          assert.equal(buf[off + 0], 10);
+          assert.equal(buf[off + 1], 20);
+          assert.equal(buf[off + 2], 30);
+          assert.equal(buf[off + 3], 255);
+        }
+      }
+      // right half still zeros
+      for (let row = 0; row < 20; row++) {
+        for (let col = 20; col < 40; col++) {
+          const off = (row * 40 + col) * 4;
+          assert.equal(buf[off + 0], 0);
+          assert.equal(buf[off + 1], 0);
+          assert.equal(buf[off + 2], 0);
+        }
+      }
+
+      // full update only changes the right half (left half already bgColor),
+      // so updateCount should now be 1.0
+      client.requestUpdate(true, 0, 0, 40, 20);
+      await new Promise(r => setTimeout(r, 100));
+      assert.ok(Math.abs(client.updateCount - 1.0) < 1e-6);
+    },
+  );
 });
 
 test('RFB: sendKey records event in mock server', async () => {
