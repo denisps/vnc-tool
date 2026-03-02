@@ -5,7 +5,8 @@
   "bin": { "vnc": "./bin/vnc" },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "test:verbose": "node --test --reporter=spec test/*.test.js"
+    "test:verbose": "node --test --reporter=spec test/*.test.js",
+    "test:qemu": "node --test test/qemu.test.js"
   },
   "engines": { "node": ">=18" },
   "license": "MIT"

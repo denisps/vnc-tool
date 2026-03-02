@@ -86,3 +86,9 @@ npm run test:verbose   # verbose output
 ```
 
 Tests use Node.js built-in `node:test` and an in-process mock VNC server.
+
+An additional optional integration test (`test/qemu.test.js`) exercises a real
+`qemu-system-x86_64` instance started with `-vnc`. It will capture PNG
+screenshots after every major update and attempt to enter the firmware BIOS. The
+test is skipped automatically if QEMU is not present, so the normal test suite
+remains lightweight.
