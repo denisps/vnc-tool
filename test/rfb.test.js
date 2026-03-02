@@ -85,6 +85,41 @@ test('RFB: captureScreen returns correct dimensions and RGBA data', async () => 
   );
 });
 
+// verify the conversion helper independently of the networking code
+test('RFB: convertRawToRGBA helper produces correct pixels', () => {
+  // prepare a small 2x2 framebuffer with two rectangles
+  // first rect at (0,0) width=2 height=1, pixels: blue, green
+  const rects = [
+    {
+      x: 0, y: 0, w: 2, h: 1,
+      data: Buffer.from([
+        /* pixel0 BGR */ 255, 0, 0, 0,
+        /* pixel1 BGR */ 0, 255, 0, 0,
+      ]),
+    },
+    // second rect at (0,1) width=2 height=1, pixels: red, black
+    {
+      x: 0, y: 1, w: 2, h: 1,
+      data: Buffer.from([
+        /* pixel2 BGR */ 0, 0, 255, 0,
+        /* pixel3 BGR */ 0, 0, 0, 0,
+      ]),
+    },
+  ];
+  const rgba = RFBClient.convertRawToRGBA(rects, 2, 2);
+  assert.equal(rgba.length, 2 * 2 * 4);
+  // expected order: row0 pixels then row1 pixels
+  const expected = [
+    // row0
+    0,   0, 255, 255, // blue -> (BGR->RGB)
+    0, 255,   0, 255, // green
+    // row1
+    255, 0,   0, 255, // red
+    0,   0,   0, 255, // black
+  ];
+  assert.deepEqual(Array.from(rgba), expected);
+});
+
 test('RFB: sendKey records event in mock server', async () => {
   await withServer(
     { width: 100, height: 100 },
