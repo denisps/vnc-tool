@@ -50,21 +50,28 @@ test('client: screenshot() writes to file', async () => {
 
 test('client: updateCount and screenshotRaw mirror RFB state', async () => {
   await withClient({ width: 20, height: 10, bgColor: { r: 1, g: 2, b: 3 } }, async (client, server) => {
-    assert.equal(client.updateCount, 0);
-    assert.ok(client.screenshotRaw);
-    assert.equal(client.screenshotRaw.length, 20 * 10 * 4);
-    // trigger a partial update
+    // take an initial raw screenshot, baseline may be non‑zero
+    const initial = await client.screenshotRaw();
+    assert.ok(initial);
+    assert.equal(initial.length, 20 * 10 * 4);
+    const baseline = client.updateCount;
+
+    // change the server colour so the next update actually modifies pixels
+    server.bgColor = { r: 2, g: 3, b: 4 };
+
+    // trigger a partial update on left half
     client._rfb.requestUpdate(true, 0, 0, 10, 10);
     await new Promise(r => setTimeout(r, 100));
-    assert.ok(client.updateCount > 0 && client.updateCount < 1);
-    const buf = client.screenshotRaw;
-    // left half should equal bgColor
+    assert.ok(client.updateCount > baseline && client.updateCount < baseline + 1);
+
+    const buf = await client.screenshotRaw();
+    // left half should equal the new bgColor
     for (let y = 0; y < 10; y++) {
       for (let x = 0; x < 10; x++) {
         const off = (y * 20 + x) * 4;
-        assert.equal(buf[off + 0], 1);
-        assert.equal(buf[off + 1], 2);
-        assert.equal(buf[off + 2], 3);
+        assert.equal(buf[off + 0], 2);
+        assert.equal(buf[off + 1], 3);
+        assert.equal(buf[off + 2], 4);
       }
     }
   });

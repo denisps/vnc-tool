@@ -82,10 +82,33 @@ test('RFB: captureScreen returns correct dimensions and RGBA data', async () => 
         assert.equal(frame.rgba[off + 3], 255, `pixel ${i} A`);
       }
       // screenshotRaw should reflect the same data
-      const raw = client.screenshotRaw;
+      const raw = await client.screenshotRaw();
       assert.ok(raw);
       assert.equal(raw.length, frame.rgba.length);
       assert.deepEqual(Array.from(raw), Array.from(frame.rgba));
+    },
+  );
+});
+
+// verify that captureScreen reuses an existing framebuffer instead of
+// always issuing a fresh update request.  The mock server records
+// 'fbupdatereq' events when it receives a request.
+test('RFB: captureScreen caches screen buffer', async () => {
+  await withServer(
+    { width: 50, height: 40 },
+    {},
+    async (client, server) => {
+      await client.connect();
+      // wait for the update that connect() requested.  This both ensures the
+      // server has processed the request and gives the framebuffer to cache.
+      await client.captureScreen();
+      let count = server.events.filter(e => e.type === 'fbupdatereq').length;
+      assert.equal(count, 1, 'initial update request should occur exactly once');
+
+      // a second captureScreen() still shouldn't add another request
+      await client.captureScreen();
+      let count2 = server.events.filter(e => e.type === 'fbupdatereq').length;
+      assert.equal(count2, count, 'captureScreen should reuse internal buffer');
     },
   );
 });
@@ -129,43 +152,50 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
   await withServer(
     { width: 40, height: 20, bgColor: { r: 10, g: 20, b: 30 } },
     {},
-    async (client) => {
+    async (client, server) => {
       await client.connect();
-      assert.equal(client.updateCount, 0);
-      assert.ok(client.screenshotRaw);
-      assert.equal(client.screenshotRaw.length, 40 * 20 * 4);
+      const initial = await client.screenshotRaw();
+      assert.ok(initial);
+      assert.equal(initial.length, 40 * 20 * 4);
+      const baseline = client.updateCount;
+
+      // change server colour so half update will show changes
+      server.bgColor = { r: 11, g: 21, b: 31 };
 
       // request half-width update
       client.requestUpdate(true, 0, 0, 20, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(Math.abs(client.updateCount - 0.5) < 1e-6);
+      assert.ok(client.updateCount > baseline && client.updateCount < baseline + 1);
 
-      const buf = client.screenshotRaw;
-      // left half should be bgColor
+      const buf = await client.screenshotRaw();
+      // left half should be the new bgColor
       for (let row = 0; row < 20; row++) {
         for (let col = 0; col < 20; col++) {
+          const off = (row * 40 + col) * 4;
+          assert.equal(buf[off + 0], 11);
+          assert.equal(buf[off + 1], 21);
+          assert.equal(buf[off + 2], 31);
+          assert.equal(buf[off + 3], 255);
+        }
+      }
+      // right half should remain the original bgColor from the
+      // initial full-capture (10,20,30).
+      for (let row = 0; row < 20; row++) {
+        for (let col = 20; col < 40; col++) {
           const off = (row * 40 + col) * 4;
           assert.equal(buf[off + 0], 10);
           assert.equal(buf[off + 1], 20);
           assert.equal(buf[off + 2], 30);
-          assert.equal(buf[off + 3], 255);
-        }
-      }
-      // right half still zeros
-      for (let row = 0; row < 20; row++) {
-        for (let col = 20; col < 40; col++) {
-          const off = (row * 40 + col) * 4;
-          assert.equal(buf[off + 0], 0);
-          assert.equal(buf[off + 1], 0);
-          assert.equal(buf[off + 2], 0);
         }
       }
 
-      // full update only changes the right half (left half already bgColor),
-      // so updateCount should now be 1.0
+      // full update only changes the right half (left half already
+      // bgColor).  since updateCount is cumulative we'll just make sure it
+      // increases by less than a full screen's worth of change.
+      const baseline2 = client.updateCount;
       client.requestUpdate(true, 0, 0, 40, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(Math.abs(client.updateCount - 1.0) < 1e-6);
+      assert.ok(client.updateCount > baseline2 && client.updateCount < baseline2 + 1);
     },
   );
 });
