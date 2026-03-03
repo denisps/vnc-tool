@@ -62,13 +62,14 @@ test('RFB: VNC auth with wrong password fails', async () => {
   }
 });
 
-test('RFB: captureScreen returns correct dimensions and RGBA data', async () => {
+test('RFB: startScreenBuffering + captureScreen returns correct dimensions and RGBA data', async () => {
   await withServer(
     { width: 80, height: 60, bgColor: { r: 255, g: 0, b: 0 } },
     {},
     async (client) => {
       await client.connect();
-      const frame = await client.captureScreen();
+      const screen = await client.startScreenBuffering();
+      const frame  = screen.captureScreen();   // synchronous
       assert.equal(frame.width,  80);
       assert.equal(frame.height, 60);
       assert.equal(frame.rgba.length, 80 * 60 * 4);
@@ -81,8 +82,8 @@ test('RFB: captureScreen returns correct dimensions and RGBA data', async () => 
         assert.equal(frame.rgba[off + 2],   0, `pixel ${i} B`);
         assert.equal(frame.rgba[off + 3], 255, `pixel ${i} A`);
       }
-      // screenshotRaw should reflect the same data
-      const raw = await client.screenshotRaw();
+      // screenshotRaw should reflect the same data (also synchronous)
+      const raw = screen.screenshotRaw();
       assert.ok(raw);
       assert.equal(raw.length, frame.rgba.length);
       assert.deepEqual(Array.from(raw), Array.from(frame.rgba));
@@ -90,25 +91,23 @@ test('RFB: captureScreen returns correct dimensions and RGBA data', async () => 
   );
 });
 
-// verify that captureScreen reuses an existing framebuffer instead of
-// always issuing a fresh update request.  The mock server records
-// 'fbupdatereq' events when it receives a request.
-test('RFB: captureScreen caches screen buffer', async () => {
+// verify that startScreenBuffering issues exactly one request, and that
+// the synchronous captureScreen() on the returned ScreenBuffer does not
+// issue additional requests.
+test('RFB: startScreenBuffering caches screen buffer', async () => {
   await withServer(
     { width: 50, height: 40 },
     {},
     async (client, server) => {
       await client.connect();
-      // wait for the update that connect() requested.  This both ensures the
-      // server has processed the request and gives the framebuffer to cache.
-      await client.captureScreen();
-      let count = server.events.filter(e => e.type === 'fbupdatereq').length;
-      assert.equal(count, 1, 'initial update request should occur exactly once');
+      const screen = await client.startScreenBuffering();
+      const count  = server.events.filter(e => e.type === 'fbupdatereq').length;
+      assert.equal(count, 1, 'startScreenBuffering should issue exactly one request');
 
-      // a second captureScreen() still shouldn't add another request
-      await client.captureScreen();
-      let count2 = server.events.filter(e => e.type === 'fbupdatereq').length;
-      assert.equal(count2, count, 'captureScreen should reuse internal buffer');
+      // captureScreen() is synchronous — no new network request
+      screen.captureScreen();
+      const count2 = server.events.filter(e => e.type === 'fbupdatereq').length;
+      assert.equal(count2, count, 'captureScreen should not issue additional requests');
     },
   );
 });
@@ -154,10 +153,11 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
     {},
     async (client, server) => {
       await client.connect();
-      const initial = await client.screenshotRaw();
+      const screen  = await client.startScreenBuffering();
+      const initial = screen.screenshotRaw();   // synchronous
       assert.ok(initial);
       assert.equal(initial.length, 40 * 20 * 4);
-      const baseline = client.updateCount;
+      const baseline = screen.updateCount;
 
       // change server colour so half update will show changes
       server.bgColor = { r: 11, g: 21, b: 31 };
@@ -165,9 +165,9 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
       // request half-width update
       client.requestUpdate(true, 0, 0, 20, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(client.updateCount > baseline && client.updateCount < baseline + 1);
+      assert.ok(screen.updateCount > baseline && screen.updateCount < baseline + 1);
 
-      const buf = await client.screenshotRaw();
+      const buf = screen.screenshotRaw();   // synchronous
       // left half should be the new bgColor
       for (let row = 0; row < 20; row++) {
         for (let col = 0; col < 20; col++) {
@@ -192,10 +192,10 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
       // full update only changes the right half (left half already
       // bgColor).  since updateCount is cumulative we'll just make sure it
       // increases by less than a full screen's worth of change.
-      const baseline2 = client.updateCount;
+      const baseline2 = screen.updateCount;
       client.requestUpdate(true, 0, 0, 40, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(client.updateCount > baseline2 && client.updateCount < baseline2 + 1);
+      assert.ok(screen.updateCount > baseline2 && screen.updateCount < baseline2 + 1);
     },
   );
 });

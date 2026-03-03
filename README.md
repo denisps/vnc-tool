@@ -74,6 +74,39 @@ vnc --host 192.168.1.10 --json click 100 200
 # → {"ok":true,"message":"Clicked (100, 200) with left"}
 ```
 
+## Programmatic API
+
+```js
+const { VNCClient } = require('./lib/client');
+
+const client = new VNCClient({ host: '192.168.1.10', password: 'secret' });
+await client.connect();
+
+// ── One-shot commands (no framebuffer allocated) ──────────────────────────
+await client.keyPress('ctrl+c');
+await client.mouseClick(640, 400, 'left');
+await client.type('hello');
+
+// ── Screen capture (framebuffer allocated on first call) ─────────────────
+// Explicitly warm up the buffer once, then call captureScreen / screenshotRaw
+// synchronously as many times as needed with no further I/O.
+const screen = await client.startScreenBuffering();
+
+const { width, height, rgba } = screen.captureScreen(); // Buffer copy, sync
+const raw = screen.screenshotRaw();                     // Buffer copy, sync
+console.log(screen.updateCount);                        // fractional float
+
+// Or take a PNG without managing the ScreenBuffer yourself:
+const png = await client.screenshot('/tmp/out.png');
+
+await client.disconnect();
+```
+
+`startScreenBuffering()` is optional. Skip it entirely for workloads that only
+send keyboard/mouse events — no buffer memory is ever allocated.
+
+---
+
 ## Command reference
 
 See [docs/commands.md](docs/commands.md) for the full command reference and all options.
