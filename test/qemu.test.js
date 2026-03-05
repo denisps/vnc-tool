@@ -97,6 +97,9 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
 
   let client;
   let screenshotSeq = 0;
+  // Suppress unhandled 'error' events on the client — we handle them by
+  // letting the active test fail naturally (e.g. next await throws).
+  const clientErrors = [];
 
   /** Save a screenshot and return its path. */
   async function snap(prefix) {
@@ -106,69 +109,74 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
     return fname;
   }
 
-  // ── sub-test 1: connect ──
-  await t.test('start qemu and connect to VNC', { timeout: CONNECT_TIMEOUT }, async () => {
-    client = await waitForVnc(port, CONNECT_TIMEOUT - 1000);
-  });
+  try {
+    // ── sub-test 1: connect ──
+    await t.test('start qemu and connect to VNC', { timeout: CONNECT_TIMEOUT }, async () => {
+      client = await waitForVnc(port, CONNECT_TIMEOUT - 1000);
+      // Attach error listener immediately so unhandled-error events don't crash
+      // the process if qemu dies or reconnection fails mid-test.
+      client.on('error', (err) => clientErrors.push(err));
+    });
 
-  if (!client) return;
+    if (!client) return;
 
-  // ── sub-test 2: capture boot frames ──
-  await t.test('capture boot screen updates', { timeout: CAPTURE_DURATION + 5000 }, async () => {
-    // take an initial screenshot right away
-    await snap('boot');
+    // ── sub-test 2: capture boot frames ──
+    await t.test('capture boot screen updates', { timeout: CAPTURE_DURATION + 5000 }, async () => {
+      // take an initial screenshot right away
+      await snap('boot');
 
-    // wait for the first real update (SeaBIOS draws the splash)
-    let baseline = client.updateCount;
-    baseline = await waitForUpdate(client, baseline, 0.01, 3000);
-    await snap('boot');
+      // wait for the first real update (SeaBIOS draws the splash)
+      let baseline = client.updateCount;
+      baseline = await waitForUpdate(client, baseline, 0.01, 3000);
+      await snap('boot');
 
-    // capture frames on every major screen change (~10% of pixels)
-    const start = Date.now();
-    while (!qemuExited && Date.now() - start < CAPTURE_DURATION) {
-      const prev = client.updateCount;
-      await new Promise(r => setTimeout(r, 250));
-      const delta = client.updateCount - prev;
-      if (delta >= 0.05) {
-        await snap('boot');
+      // capture frames on every major screen change (~10% of pixels)
+      const start = Date.now();
+      while (!qemuExited && Date.now() - start < CAPTURE_DURATION) {
+        const prev = client.updateCount;
+        await new Promise(r => setTimeout(r, 250));
+        const delta = client.updateCount - prev;
+        if (delta >= 0.05) {
+          await snap('boot');
+        }
       }
-    }
-  });
+    });
 
-  // ── sub-test 3: enter BIOS ──
-  await t.test('press F2 to enter BIOS and capture', { timeout: 15000 }, async () => {
-    // spam F2 / Esc / Del — different firmwares use different keys
-    for (let i = 0; i < 5; i++) {
-      await client.keyPress('f2');
-      await client.delay(80);
-      await client.keyPress('Escape');
-      await client.delay(80);
-      await client.keyPress('Delete');
-      await client.delay(80);
-    }
-
-    // give BIOS time to redraw
-    const baseline = client.updateCount;
-    await waitForUpdate(client, baseline, 0.05, 3000);
-    await snap('bios');
-
-    // capture a few more frames over 5 s
-    const start = Date.now();
-    while (!qemuExited && Date.now() - start < 5000) {
-      const prev = client.updateCount;
-      await new Promise(r => setTimeout(r, 250));
-      if (client.updateCount - prev >= 0.01) {
-        await snap('bios');
+    // ── sub-test 3: enter BIOS ──
+    await t.test('press F2 to enter BIOS and capture', { timeout: 15000 }, async () => {
+      // spam F2 / Esc / Del — different firmwares use different keys
+      for (let i = 0; i < 5; i++) {
+        await client.keyPress('f2');
+        await client.delay(80);
+        await client.keyPress('Escape');
+        await client.delay(80);
+        await client.keyPress('Delete');
+        await client.delay(80);
       }
-    }
-  });
 
-  // ── cleanup ──
-  if (client) await client.disconnect();
-  if (!qemuExited) qemu.kill('SIGTERM');
+      // give BIOS time to redraw
+      const baseline = client.updateCount;
+      await waitForUpdate(client, baseline, 0.05, 3000);
+      await snap('bios');
 
-  // ── final assertion ──
-  const files = fs.readdirSync(pngDir).filter(f => f.endsWith('.png'));
-  console.log(`  screenshots saved to ${pngDir} (${files.length} files)`);
-  assert.ok(files.length >= 2, `expected ≥ 2 screenshots, got ${files.length}`);
+      // capture a few more frames over 5 s
+      const start = Date.now();
+      while (!qemuExited && Date.now() - start < 5000) {
+        const prev = client.updateCount;
+        await new Promise(r => setTimeout(r, 250));
+        if (client.updateCount - prev >= 0.01) {
+          await snap('bios');
+        }
+      }
+    });
+
+    // ── final assertion ──
+    const files = fs.readdirSync(pngDir).filter(f => f.endsWith('.png'));
+    console.log(`  screenshots saved to ${pngDir} (${files.length} files)`);
+    assert.ok(files.length >= 2, `expected ≥ 2 screenshots, got ${files.length}`);
+  } finally {
+    // Always clean up regardless of sub-test outcomes.
+    if (client) await client.disconnect();
+    if (!qemuExited) qemu.kill('SIGTERM');
+  }
 });

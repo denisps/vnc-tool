@@ -1,13 +1,17 @@
 {
   "name": "vnc-tool",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "VNC CLI tool for AI agents and workstation auditing",
-  "bin": { "vnc": "./bin/vnc" },
+  "bin": {
+    "vnc": "./bin/vnc"
+  },
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:verbose": "node --test --reporter=spec test/*.test.js",
     "test:qemu": "node --test test/qemu.test.js"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT"
 }
