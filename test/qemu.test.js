@@ -20,6 +20,38 @@ function hasQemu() {
   }
 }
 
+/**
+ * Find OVMF UEFI firmware files.  Returns a pflash descriptor (preferred —
+ * writable NVRAM makes Escape/F2 setup entry reliable) or a single-file
+ * fallback.  Returns null when no OVMF is found.
+ *
+ * @returns {{ type: 'pflash', code: string, vars: string }
+ *          |{ type: 'bios',   path: string }
+ *          | null}
+ */
+function findOvmf() {
+  // Prefer pflash split: CODE (readonly) + VARS (writable copy).
+  const pflashCode = '/usr/share/OVMF/OVMF_CODE_4M.fd';
+  const pflashVars = '/usr/share/OVMF/OVMF_VARS_4M.fd';
+  try {
+    fs.accessSync(pflashCode);
+    fs.accessSync(pflashVars);
+    return { type: 'pflash', code: pflashCode, vars: pflashVars };
+  } catch (_) {}
+
+  // Fallback: single combined image loaded as legacy BIOS.
+  const singles = [
+    '/usr/share/ovmf/OVMF.fd',
+    '/usr/share/OVMF/OVMF.fd',
+    '/usr/share/qemu/OVMF.fd',
+    '/usr/share/edk2/ovmf/OVMF.fd',
+  ];
+  for (const p of singles) {
+    try { fs.accessSync(p); return { type: 'bios', path: p }; } catch (_) {}
+  }
+  return null;
+}
+
 // Configurable timeouts (milliseconds); override via env vars in CI.
 const GLOBAL_TIMEOUT   = parseInt(process.env.QEMU_TEST_TIMEOUT     || '60000', 10);
 const CONNECT_TIMEOUT  = parseInt(process.env.QEMU_CONNECT_TIMEOUT  || '15000', 10);
@@ -79,13 +111,32 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
   const pngDir  = path.join(__dirname, `qemu-screens-${Date.now()}`);
   fs.mkdirSync(pngDir, { recursive: true });
 
+  const ovmf = findOvmf();
+
   // ── spawn qemu ──
-  const qemu = spawn('qemu-system-x86_64', [
+  const qemuArgs = [
     '-display', 'none',
     '-vnc', `:${display}`,
-    '-m', '32M',
-    '-boot', 'menu=on',
-  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    '-m', '64M',
+  ];
+
+  let varsCopy = null;  // writable VARS copy; cleaned up in finally
+  if (ovmf && ovmf.type === 'pflash') {
+    // Use pflash split: readonly CODE + writable VARS copy so NVRAM is
+    // mutable, which makes Escape/F2 setup entry reliable.
+    varsCopy = path.join(os.tmpdir(), `ovmf-vars-${Date.now()}.fd`);
+    fs.copyFileSync(ovmf.vars, varsCopy);
+    qemuArgs.push('-drive', `if=pflash,format=raw,readonly=on,file=${ovmf.code}`);
+    qemuArgs.push('-drive', `if=pflash,format=raw,file=${varsCopy}`);
+  } else if (ovmf && ovmf.type === 'bios') {
+    // OVMF gives a proper blue UEFI setup screen accessible via Escape/F2
+    qemuArgs.push('-bios', ovmf.path);
+  } else {
+    // SeaBIOS fallback: boot menu accessible via F12
+    qemuArgs.push('-boot', 'menu=on');
+  }
+
+  const qemu = spawn('qemu-system-x86_64', qemuArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   // drain output to prevent backpressure from stopping the process
   qemu.stdout.on('data', () => {});
@@ -100,6 +151,9 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
   // Suppress unhandled 'error' events on the client — we handle them by
   // letting the active test fail naturally (e.g. next await throws).
   const clientErrors = [];
+  // Interval that hammers Escape+F2 as soon as we connect so we never miss
+  // the narrow TianoCore UEFI setup-entry window (open ~1–3 s after boot).
+  let keyInterval = null;
 
   /** Save a screenshot and return its path. */
   async function snap(prefix) {
@@ -110,20 +164,21 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
   }
 
   /**
-   * Return true if buffer contains a significant number of mostly-blue
-   * pixels.  This is a crude heuristic to detect a BIOS/firmware screen,
-   * which typically has a predominantly blue background.
+   * Return true if the raw RGBA buffer looks like a BIOS/UEFI setup screen.
+   * Accepts two common TianoCore/OVMF colour themes:
+   *   - Classic dark-blue background  (b > 100, r < 100, g < 100)
+   *   - Modern gray/silver background (r ≈ g ≈ b, 80–200)
+   * Either way ≥25 % of pixels must match to pass.
    */
-  function isMostlyBlue(buf) {
-    let blueCount = 0;
-    const total    = buf.length / 4;
-    for (let off = 0; off < buf.length; off += 4) {
-      const r = buf[off + 0];
-      const g = buf[off + 1];
-      const b = buf[off + 2];
-      if (b > 150 && r < 100 && g < 100) blueCount++;
+  function isBiosScreen(rgba) {
+    let count = 0;
+    const total = rgba.length / 4;
+    for (let off = 0; off < rgba.length; off += 4) {
+      const r = rgba[off], g = rgba[off + 1], b = rgba[off + 2];
+      if (b > 100 && r < 100 && g < 100) { count++; continue; }  // blue theme
+      if (r > 80 && r < 200 && Math.abs(r - g) < 30 && Math.abs(r - b) < 30) count++; // gray theme
     }
-    return blueCount / total > 0.25; // at least 25% of pixels mostly blue
+    return count / total > 0.25;
   }
 
   try {
@@ -133,6 +188,12 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
       // Attach error listener immediately so unhandled-error events don't crash
       // the process if qemu dies or reconnection fails mid-test.
       client.on('error', (err) => clientErrors.push(err));
+      // Hammer Escape+F2 from the moment we connect so we catch the brief
+      // TianoCore UEFI setup-entry window without relying on precise timing.
+      keyInterval = setInterval(() => {
+        client.keyPress('Escape').catch(() => {});
+        client.keyPress('f2').catch(() => {});
+      }, 150);
     });
 
     if (!client) return;
@@ -142,33 +203,33 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
       // take an initial screenshot right away
       await snap('boot');
 
-      // wait for the first real update (SeaBIOS draws the splash)
-      let baseline = client.updateCount;
-      baseline = await waitForUpdate(client, baseline, 0.01, 3000);
+      // wait for the first real update (SeaBIOS/TianoCore draws the splash)
+      const baseline = client.updateCount;
+      await waitForUpdate(client, baseline, 0.01, 3000);
       await snap('boot');
 
-      // capture frames on every major screen change (~10% of pixels)
+      // Capture frames — key hammering continues concurrently via keyInterval.
       const start = Date.now();
       while (!qemuExited && Date.now() - start < CAPTURE_DURATION) {
         const prev = client.updateCount;
         await new Promise(r => setTimeout(r, 250));
-        const delta = client.updateCount - prev;
-        if (delta >= 0.05) {
+        if (client.updateCount - prev >= 0.05) {
           await snap('boot');
         }
       }
     });
 
-    // ── sub-test 3: enter BIOS ──
+    // ── sub-test 3: verify BIOS / firmware UI ──
     await t.test('press F2 to enter BIOS and capture', { timeout: 15000 }, async () => {
-      // spam F2 / Esc / Del — different firmwares use different keys
-      for (let i = 0; i < 15; i++) {
-        //await client.keyPress('f2');
-        //await client.delay(80);
+      // Stop generic hammering; send a targeted burst now.
+      clearInterval(keyInterval);
+      keyInterval = null;
+
+      for (let i = 0; i < 10; i++) {
         await client.keyPress('Escape');
         await client.delay(80);
-        //await client.keyPress('Delete');
-        //await client.delay(80);
+        await client.keyPress('f2');
+        await client.delay(80);
       }
 
       // give BIOS time to redraw; some firmware can take several seconds
@@ -177,10 +238,10 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
       await waitForUpdate(client, baseline, 0.1, 5000);
       const biosShot = await snap('bios');
 
-      // quick heuristic: the BIOS screen is usually mostly blue.  verify
-      // that the first 'bios' capture satisfies that condition.
-      const buf = fs.readFileSync(biosShot);
-      assert.ok(isMostlyBlue(buf), 'first BIOS screenshot should be mostly blue');
+      // quick heuristic: the BIOS/UEFI setup screen is usually mostly blue.
+      // use raw RGBA data (not the compressed PNG) for pixel analysis.
+      const rgba = await client.screenshotRaw();
+      assert.ok(isBiosScreen(rgba), 'BIOS/UEFI setup screen should be visible (blue or gray theme)');
 
       // capture a few more frames over 5 s
       const start = Date.now();
@@ -199,7 +260,9 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
     assert.ok(files.length >= 2, `expected ≥ 2 screenshots, got ${files.length}`);
   } finally {
     // Always clean up regardless of sub-test outcomes.
+    clearInterval(keyInterval);
     if (client) await client.disconnect();
     if (!qemuExited) qemu.kill('SIGTERM');
+    if (varsCopy) { try { fs.unlinkSync(varsCopy); } catch (_) {} }
   }
 });
