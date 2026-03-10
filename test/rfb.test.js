@@ -200,6 +200,34 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
   );
 });
 
+// ensure that once connected the client continues to request updates
+// automatically, and that the server sees an initial non-incremental
+// request followed by incremental ones.
+test('RFB: automatic update loop after connect', async () => {
+  await withServer(
+    { width: 20, height: 10 },
+    {},
+    async (client, server) => {
+      await client.connect();
+
+      let seen = 0;
+      client.on('update', () => { seen++; });
+
+      // give the client a short moment to collect a few updates
+      await new Promise(r => setTimeout(r, 100));
+
+      assert.ok(seen >= 2, 'should receive multiple update events');
+
+      const fbreqs = server.events.filter(e => e.type === 'fbupdatereq');
+      assert.ok(fbreqs.length >= 2, 'server should have gotten several requests');
+      assert.equal(fbreqs[0].incremental, 0, 'first request non-incremental');
+      for (let i = 1; i < fbreqs.length; i++) {
+        assert.equal(fbreqs[i].incremental, 1, `request ${i} should be incremental`);
+      }
+    },
+  );
+});
+
 test('RFB: sendKey records event in mock server', async () => {
   await withServer(
     { width: 100, height: 100 },
