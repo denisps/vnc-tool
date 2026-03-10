@@ -163,17 +163,18 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
     await t.test('press F2 to enter BIOS and capture', { timeout: 15000 }, async () => {
       // spam F2 / Esc / Del — different firmwares use different keys
       for (let i = 0; i < 15; i++) {
-        await client.keyPress('f2');
-        await client.delay(80);
-        //await client.keyPress('Escape');
+        //await client.keyPress('f2');
         //await client.delay(80);
+        await client.keyPress('Escape');
+        await client.delay(80);
         //await client.keyPress('Delete');
         //await client.delay(80);
       }
 
-      // give BIOS time to redraw
+      // give BIOS time to redraw; some firmware can take several seconds
+      // to paint a configuration screen, so allow a longer interval.
       const baseline = client.updateCount;
-      await waitForUpdate(client, baseline, 0.1, 3000);
+      await waitForUpdate(client, baseline, 0.1, 5000);
       const biosShot = await snap('bios');
 
       // quick heuristic: the BIOS screen is usually mostly blue.  verify
