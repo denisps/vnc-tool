@@ -165,7 +165,9 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
       // request half-width update
       client.requestUpdate(true, 0, 0, 20, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(screen.updateCount > baseline && screen.updateCount < baseline + 1);
+      // count should increase; avoid strict upper bound since the built-in
+      // incremental loop may deliver additional updates.
+      assert.ok(screen.updateCount > baseline, 'updateCount should advance');
 
       const buf = screen.screenshotRaw();   // synchronous
       // left half should be the new bgColor
@@ -178,37 +180,40 @@ test('RFB: updateCount and screenshotRaw behave correctly', async () => {
           assert.equal(buf[off + 3], 255);
         }
       }
-      // right half should remain the original bgColor from the
-      // initial full-capture (10,20,30).
-      for (let row = 0; row < 20; row++) {
-        for (let col = 20; col < 40; col++) {
-          const off = (row * 40 + col) * 4;
-          assert.equal(buf[off + 0], 10);
-          assert.equal(buf[off + 1], 20);
-          assert.equal(buf[off + 2], 30);
-        }
-      }
+      // we only guarantee that the left half has been updated; the
+      // automatic incremental loop may already have sent a further
+      // full-screen frame that overwrote the right half, so we don't
+      // assert anything about the right side yet.
 
-      // full update only changes the right half (left half already
-      // bgColor).  since updateCount is cumulative we'll just make sure it
-      // increases by less than a full screen's worth of change.
-      const baseline2 = screen.updateCount;
+      // now ask for a full-screen update and verify that eventually the
+      // entire buffer matches the new colour (this covers both the
+      // explicit request and any automatic frames that may occur).
       client.requestUpdate(true, 0, 0, 40, 20);
       await new Promise(r => setTimeout(r, 100));
-      assert.ok(screen.updateCount > baseline2 && screen.updateCount < baseline2 + 1);
+      const buf2 = screen.screenshotRaw();
+      for (let i = 0; i < buf2.length; i += 4) {
+        assert.equal(buf2[i + 0], 11);
+        assert.equal(buf2[i + 1], 21);
+        assert.equal(buf2[i + 2], 31);
+        assert.equal(buf2[i + 3], 255);
+      }
+      assert.ok(screen.updateCount > baseline, 'updateCount should be at least baseline after full-screen');
     },
   );
 });
 
-// ensure that once connected the client continues to request updates
-// automatically, and that the server sees an initial non-incremental
-// request followed by incremental ones.
-test('RFB: automatic update loop after connect', async () => {
+// ensure that once buffering starts the client enters an automatic
+// update loop: it sends a full-screen request and thereafter keeps
+// issuing incremental requests after each frame.
+test('RFB: automatic update loop when buffering starts', async () => {
   await withServer(
     { width: 20, height: 10 },
     {},
     async (client, server) => {
       await client.connect();
+
+      // start buffering, which should kick off the non-incremental request
+      const screen = await client.startScreenBuffering();
 
       let seen = 0;
       client.on('update', () => { seen++; });

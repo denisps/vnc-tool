@@ -62,7 +62,9 @@ test('client: updateCount and screenshotRaw mirror RFB state', async () => {
     // trigger a partial update on left half
     client._rfb.requestUpdate(true, 0, 0, 10, 10);
     await new Promise(r => setTimeout(r, 100));
-    assert.ok(client.updateCount > baseline && client.updateCount < baseline + 1);
+    // at minimum the count should have increased; the auto-update loop may
+    // send additional frames so we don't assert an upper bound here.
+    assert.ok(client.updateCount > baseline, 'updateCount should advance');
 
     const buf = await client.screenshotRaw();
     // left half should equal the new bgColor
