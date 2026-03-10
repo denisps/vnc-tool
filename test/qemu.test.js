@@ -76,7 +76,7 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
 
   const port    = 5901;
   const display = port - 5900;
-  const pngDir  = path.join(__dirname, '..', 'logs', `qemu-screens-${Date.now()}`);
+  const pngDir  = path.join(__dirname, `qemu-screens-${Date.now()}`);
   fs.mkdirSync(pngDir, { recursive: true });
 
   // ── spawn qemu ──
@@ -107,6 +107,23 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
     const fname = path.join(pngDir, `${prefix}-${++screenshotSeq}.png`);
     fs.writeFileSync(fname, buf);
     return fname;
+  }
+
+  /**
+   * Return true if buffer contains a significant number of mostly-blue
+   * pixels.  This is a crude heuristic to detect a BIOS/firmware screen,
+   * which typically has a predominantly blue background.
+   */
+  function isMostlyBlue(buf) {
+    let blueCount = 0;
+    const total    = buf.length / 4;
+    for (let off = 0; off < buf.length; off += 4) {
+      const r = buf[off + 0];
+      const g = buf[off + 1];
+      const b = buf[off + 2];
+      if (b > 150 && r < 100 && g < 100) blueCount++;
+    }
+    return blueCount / total > 0.25; // at least 25% of pixels mostly blue
   }
 
   try {
@@ -145,19 +162,24 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
     // ── sub-test 3: enter BIOS ──
     await t.test('press F2 to enter BIOS and capture', { timeout: 15000 }, async () => {
       // spam F2 / Esc / Del — different firmwares use different keys
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 15; i++) {
         await client.keyPress('f2');
         await client.delay(80);
-        await client.keyPress('Escape');
-        await client.delay(80);
-        await client.keyPress('Delete');
-        await client.delay(80);
+        //await client.keyPress('Escape');
+        //await client.delay(80);
+        //await client.keyPress('Delete');
+        //await client.delay(80);
       }
 
       // give BIOS time to redraw
       const baseline = client.updateCount;
-      await waitForUpdate(client, baseline, 0.05, 3000);
-      await snap('bios');
+      await waitForUpdate(client, baseline, 0.1, 3000);
+      const biosShot = await snap('bios');
+
+      // quick heuristic: the BIOS screen is usually mostly blue.  verify
+      // that the first 'bios' capture satisfies that condition.
+      const buf = fs.readFileSync(biosShot);
+      assert.ok(isMostlyBlue(buf), 'first BIOS screenshot should be mostly blue');
 
       // capture a few more frames over 5 s
       const start = Date.now();
