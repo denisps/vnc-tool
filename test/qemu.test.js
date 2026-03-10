@@ -76,7 +76,7 @@ test('optional: qemu VNC boot capture (requires qemu)', { timeout: GLOBAL_TIMEOU
 
   const port    = 5901;
   const display = port - 5900;
-  const pngDir  = path.join(os.tmpdir(), `qemu-screens-${Date.now()}`);
+  const pngDir  = path.join(__dirname, '..', 'logs', `qemu-screens-${Date.now()}`);
   fs.mkdirSync(pngDir, { recursive: true });
 
   // ── spawn qemu ──
