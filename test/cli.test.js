@@ -33,7 +33,7 @@ async function withServer(opts, fn) {
 test('cli: --version outputs version string', async () => {
   const { stdout, err } = await run(['--version']);
   assert.ok(!err, `Unexpected error: ${err}`);
-  assert.ok(stdout.includes('0.1.0'), `Expected version, got: ${stdout}`);
+  assert.ok(stdout.includes('0.4.0'), `Expected version, got: ${stdout}`);
 });
 
 test('cli: --help outputs usage info', async () => {

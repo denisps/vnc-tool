@@ -1,6 +1,6 @@
 {
   "name": "vnc-tool",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "VNC CLI tool for AI agents and workstation auditing",
   "bin": {
     "vnc": "./bin/vnc"
