@@ -11,7 +11,7 @@ const {
   listSessions, sessionExists,
 } = require('../lib/session');
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 
 // ── Help text ─────────────────────────────────────────────────────────────────
 
